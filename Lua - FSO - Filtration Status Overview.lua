@@ -735,8 +735,8 @@ local function render_overview_box(idx, x, y, w, h)
     local s0_pct = bar_percent(r.slot0, SLOT_QUANTITY_MAX)
     local s1_pct = bar_percent(r.slot1, SLOT_QUANTITY_MAX)
     local metrics_y = y + 15
-    local slot0_label_y = y + 22
-    local slot0_bar_y = y + 30
+    local slot0_label_y = y + 28
+    local slot0_bar_y = y + 36
     local slot1_label_y = y + 49
     local slot1_bar_y = y + 57
     local button_y = y + 75
@@ -748,6 +748,23 @@ local function render_overview_box(idx, x, y, w, h)
     local button_x = x + math.floor((w - button_row_w) / 2)
     local bar_h = 12
     local button_h = 14
+
+    -- Check if this box is a liquid filtration device
+    local is_liquid = false
+    local device = pa_devices[idx]
+    local prefab = tonumber(device and device.prefab) or 0
+    if prefab == (PA_PREFAB_FILTERS.liquid and PA_PREFAB_FILTERS.liquid[1]) then
+        is_liquid = true
+    end
+
+    -- If liquid, get volume
+    local volume_of_liquid = nil
+    if is_liquid then
+        local namehash = tonumber(device and device.namehash) or 0
+        if prefab ~= 0 and namehash ~= 0 then
+            volume_of_liquid = safe_batch_read_name(prefab, namehash, LT.VolumeOfLiquid, LBM.Average)
+        end
+    end
 
     s:element({
         id = "box_" .. idx .. "_bg",
@@ -764,6 +781,7 @@ local function render_overview_box(idx, x, y, w, h)
         style = { font_size = 9, color = box_label_color(idx), align = "center" }
     })
 
+
     handles.overview["box_" .. idx .. "_temp_text"] = s:element({
         id = "box_" .. idx .. "_temp_text",
         type = "label",
@@ -771,6 +789,17 @@ local function render_overview_box(idx, x, y, w, h)
         props = { text = "Temp In " .. format_temperature_label(r.temperature) },
         style = { font_size = 6, color = temperature_value_color(r.temperature), align = "left" }
     })
+
+    -- If liquid, show VolumeOfLiquid label below temp/press
+    if is_liquid then
+        s:element({
+            id = "box_" .. idx .. "_vol_liquid_label",
+            type = "label",
+            rect = { unit = "px", x = x + math.floor((w - 18) / 2) + 12, y = metrics_y + 8, w = math.ceil((w - 18) / 2), h = 8 },
+            props = { text = "Volume " .. (volume_of_liquid and fmt(volume_of_liquid, 1) .. " L" or "--") },
+            style = { font_size = 6, color = C.accent, align = "right" }
+        })
+    end
 
     handles.overview["box_" .. idx .. "_press_text"] = s:element({
         id = "box_" .. idx .. "_press_text",
