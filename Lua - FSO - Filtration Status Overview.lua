@@ -46,13 +46,6 @@ local batch_read_name = ic.batch_read_name
 local batch_read_slot_name = ic.batch_read_slot_name
 
 -- ==================== PERSISTENT MEMORY MAP ====================
--- Slots 0-11:   Box 1-12 PA prefab hashes
--- Slots 12-23:  Box 1-12 PA name hashes
--- Slots 24-35:  Box 1-12 label text hashes (legacy)
--- Slots 36-143: Box 1-12 label strings (len + 8 data slots each, 3 chars/slot)
--- Slot 144:      Max pressure range (kPa)
--- Slots 145-156: Box 1-12 filtration control mode (0=off, 1=on, 2=auto)
--- Slots 157-168: Box 1-12 auto-off threshold (kPa)
 
 local MEM_PA_PREFAB_BEGIN = 0
 local MEM_PA_NAMEHASH_BEGIN = 12
@@ -61,6 +54,7 @@ local MEM_LABELSTR_BEGIN = 36
 local MEM_PRESSURE_MAX = 144
 local MEM_FILTER_MODE_BEGIN = 145
 local MEM_AUTO_THRESHOLD_BEGIN = 157
+local MEM_REFRESH_TICKS = 169
 
 local LABEL_MAX_CHARS = 24
 local LABEL_CHARS_PER_SLOT = 3
@@ -107,6 +101,8 @@ for i = 1, BOX_COUNT do
     filter_modes[i] = 0
     filter_auto_thresholds[i] = 0
 end
+
+local cached_fso_dropdowns = nil
 
 -- ==================== COLORS ====================
 
@@ -484,6 +480,23 @@ local function build_filtered_device_options(devices, allowed_prefabs, current_d
     return options, candidates, selected
 end
 
+local function device_list_safe()
+    local ok, result = pcall(device_list)
+    if not ok or result == nil then return {} end
+    return result
+end
+
+local function populate_fso_dropdown_cache()
+    local devs = device_list_safe()
+    cached_fso_dropdowns = {}
+    local allowed = { PA_PREFAB_FILTERS.gas[1], PA_PREFAB_FILTERS.gas[2], PA_PREFAB_FILTERS.liquid[1] }
+    for i = 1, BOX_COUNT do
+        local opts, cands, sel = build_filtered_device_options(devs, allowed, pa_devices[i])
+        cached_fso_dropdowns[i] = { opts = opts, candidates = cands, selected = sel }
+        pa_dropdown_selected[i] = sel
+    end
+end
+
 local function refresh_pa_readings()
     for i = 1, BOX_COUNT do
         local device = pa_devices[i]
@@ -578,6 +591,10 @@ local function initialize_settings()
     end
 
     pa_pressure_max_range = sanitize_max_range(read(MEM_PRESSURE_MAX), pa_pressure_max_range)
+    local stored_ticks = tonumber(read(MEM_REFRESH_TICKS)) or 0
+    if stored_ticks >= 1 then
+        LIVE_REFRESH_TICKS = math.min(120, stored_ticks)
+    end
 end
 
 -- ==================== RENDER HELPERS ====================
@@ -749,7 +766,6 @@ local function render_overview_box(idx, x, y, w, h)
     local bar_h = 12
     local button_h = 14
 
-    -- Check if this box is a liquid filtration device
     local is_liquid = false
     local device = pa_devices[idx]
     local prefab = tonumber(device and device.prefab) or 0
@@ -757,7 +773,6 @@ local function render_overview_box(idx, x, y, w, h)
         is_liquid = true
     end
 
-    -- If liquid, get volume
     local volume_of_liquid = nil
     if is_liquid then
         local namehash = tonumber(device and device.namehash) or 0
@@ -790,7 +805,6 @@ local function render_overview_box(idx, x, y, w, h)
         style = { font_size = 6, color = temperature_value_color(r.temperature), align = "left" }
     })
 
-    -- If liquid, show VolumeOfLiquid label below temp/press
     if is_liquid then
         s:element({
             id = "box_" .. idx .. "_vol_liquid_label",
@@ -969,7 +983,6 @@ local function render_settings()
     local panel_h = H - content_y - 22
     local tab_y = panel_y + 8
     local tab_w = math.floor((panel_w - 14) / 2)
-    local devices = device_list() or {}
 
     local function render_settings_subtabs()
         local tabs = {
@@ -1065,9 +1078,29 @@ local function render_settings()
         })
 
         s:element({
+            id = "refresh_ticks_label",
+            type = "label",
+            rect = { unit = "px", x = panel_x + 194, y = base_y + 20, w = 66, h = 14 },
+            props = { text = "Refresh Ticks" },
+            style = { font_size = 8, color = C.text, align = "left" }
+        })
+
+        s:element({
+            id = "refresh_ticks_input",
+            type = "textinput",
+            rect = { unit = "px", x = panel_x + 258, y = base_y + 18, w = 50, h = 20 },
+            props = { value = tostring(LIVE_REFRESH_TICKS), placeholder = "6" },
+            on_change = function(new_value)
+                local n = math.max(1, math.min(120, tonumber(new_value) or LIVE_REFRESH_TICKS))
+                LIVE_REFRESH_TICKS = n
+                write(MEM_REFRESH_TICKS, n)
+            end
+        })
+
+        s:element({
             id = "threshold_col_label",
             type = "label",
-            rect = { unit = "px", x = panel_x + 314, y = base_y + 20, w = 88, h = 14 },
+            rect = { unit = "px", x = panel_x + 354, y = base_y + 20, w = 88, h = 14 },
             props = { text = "Auto Off < kPa" },
             style = { font_size = 8, color = C.text, align = "left" }
         })
@@ -1081,14 +1114,13 @@ local function render_settings()
             local row_y = base_y + 48 + row * 23
             local col_x = panel_x + 14
 
-            local options, candidates, selected_index = build_filtered_device_options(
-                devices,
-                { PA_PREFAB_FILTERS.gas[1], PA_PREFAB_FILTERS.gas[2], PA_PREFAB_FILTERS.liquid[1] },
-                pa_devices[idx]
-            )
-            local row_candidates = candidates
-
-            pa_dropdown_selected[idx] = selected_index
+            if cached_fso_dropdowns == nil then
+                populate_fso_dropdown_cache()
+            end
+            local cache_entry = cached_fso_dropdowns[idx] or { opts = { "Select device..." }, candidates = {}, selected = 0 }
+            local options = cache_entry.opts
+            local row_candidates = cache_entry.candidates
+            pa_dropdown_selected[idx] = cache_entry.selected
 
             s:element({
                 id = "pa_" .. i .. "_header",
@@ -1108,12 +1140,18 @@ local function render_settings()
                     open = pa_dropdown_open[idx],
                 },
                 on_toggle = function()
+                    if cached_fso_dropdowns == nil then
+                        populate_fso_dropdown_cache()
+                    end
                     pa_dropdown_open[idx] = pa_dropdown_open[idx] == "true" and "false" or "true"
                     dashboard_render(true)
                 end,
                 on_change = function(optionIndex)
                     local selected_option = tonumber(optionIndex) or 0
                     pa_dropdown_selected[idx] = selected_option
+                    if cached_fso_dropdowns and cached_fso_dropdowns[idx] then
+                        cached_fso_dropdowns[idx].selected = selected_option
+                    end
                     pa_dropdown_open[idx] = "false"
 
                     if selected_option == 0 then
@@ -1330,6 +1368,7 @@ end
 -- ==================== BOOT ====================
 
 initialize_settings()
+populate_fso_dropdown_cache()
 set_view(view)
 
 -- ==================== MAIN LOOP ====================
